@@ -29,7 +29,10 @@ export const createIndexes = async () => {
     db.collection('customers').createIndex({ email: 1 }),
     db.collection('leads').createIndex({ email: 1 }),
     db.collection('leads').createIndex({ status: 1, updatedAt: -1 }),
+    db.collection('leads').createIndex({ leadOwnerId: 1, updatedAt: -1 }),
     db.collection('activities').createIndex({ customerId: 1, date: -1 }),
+    db.collection('activities').createIndex({ activityOwnerId: 1, date: -1 }),
+    db.collection('activities').createIndex({ leadId: 1, date: -1 }),
     db.collection('opportunities').createIndex({ customerId: 1, stage: 1 }),
     db.collection('proposals').createIndex({ customerId: 1, createdAt: -1 }),
     db.collection('invoices').createIndex({ invoiceNo: 1 }, { unique: true }),
@@ -63,6 +66,21 @@ export const createIndexes = async () => {
     db.collection('email_messages').createIndex({ idempotencyKey: 1 }, { unique: true }),
     db.collection('email_messages').createIndex({ customerId: 1, createdAt: -1 })
   ]);
+
+  // Legacy versions stored the bootstrap administrator as a manager. Promote only
+  // the oldest manager when the organization has no explicit administrator.
+  if (await db.collection('staff_users').countDocuments({ role: 'admin' }) === 0) {
+    const bootstrapManager = await db.collection('staff_users').findOne(
+      { role: 'manager', active: true },
+      { sort: { createdAt: 1 } }
+    );
+    if (bootstrapManager) {
+      await db.collection('staff_users').updateOne(
+        { _id: bootstrapManager._id, role: 'manager' },
+        { $set: { role: 'admin', reportingManagerId: null, updatedAt: new Date() } }
+      );
+    }
+  }
 };
 
 export const closeDatabase = async () => {

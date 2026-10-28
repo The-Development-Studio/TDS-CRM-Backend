@@ -16,7 +16,8 @@ process.env.R2_SECRET_ACCESS_KEY = "replace_me";
 process.env.R2_BUCKET = "replace_me";
 
 const { app } = await import("../dist/app.js");
-const { invoiceSchema, paymentSchema } = await import("../dist/schemas.js");
+const { activitySchema, invoiceSchema, leadSchema, paymentSchema } = await import("../dist/schemas.js");
+const { normalizeStaffRole } = await import("../dist/staffAuth.js");
 
 let server;
 let baseUrl;
@@ -113,10 +114,55 @@ test("staff page access management requires an administrator", async () => {
   assert.deepEqual(await response.json(), { error: "Staff sign-in required" });
 });
 
+test("staff roles keep administrator and manager scopes distinct", () => {
+  assert.equal(normalizeStaffRole("admin"), "admin");
+  assert.equal(normalizeStaffRole("manager"), "manager");
+  assert.equal(normalizeStaffRole("user"), "user");
+});
+
 test("lead assignee directory requires lead access", async () => {
   const response = await fetch(`${baseUrl}/api/staff-auth/assignees`);
   assert.equal(response.status, 401);
   assert.deepEqual(await response.json(), { error: "Staff sign-in required" });
+});
+
+test("activity schema preserves report and audit relationships", () => {
+  const result = activitySchema.safeParse({
+    leadId: "lead-1",
+    leadName: "Sam Customer",
+    company: "Example Limited",
+    title: "Discovery call",
+    type: "Call",
+    date: "2026-10-28",
+    time: "10:30",
+    status: "Completed",
+    user: "Asha Sales",
+    activityOwnerId: "507f1f77bcf86cd799439011",
+    contactPerson: "Sam Customer",
+    outcome: "Qualified",
+    followUpDate: "2026-10-30",
+    description: "Requested a proposal",
+    priority: "High",
+    category: "Today",
+    source: "manual"
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.data.activityOwnerId, "507f1f77bcf86cd799439011");
+  assert.equal(result.data.leadId, "lead-1");
+});
+
+test("lead schema accepts stable owner relationships for reporting", () => {
+  const result = leadSchema.safeParse({
+    name: "Sam Customer",
+    company: "Example Limited",
+    source: "Direct",
+    leadOwner: "Asha Sales",
+    leadOwnerId: "507f1f77bcf86cd799439011",
+    status: "Assigned",
+    priority: "High"
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.data.leadOwnerId, "507f1f77bcf86cd799439011");
 });
 
 test("staff account activation requires an administrator", async () => {

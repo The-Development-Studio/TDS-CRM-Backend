@@ -81,6 +81,13 @@ for (const [resource, schema] of Object.entries(resourceSchemas)) {
         ? 'user'
         : resource === 'opportunities'
           ? 'owner'
+          : undefined,
+    userOwnershipIdField: resource === 'leads'
+      ? 'leadOwnerId'
+      : resource === 'activities'
+        ? 'activityOwnerId'
+        : resource === 'opportunities'
+          ? 'ownerId'
           : undefined
   }));
 }

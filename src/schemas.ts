@@ -45,6 +45,7 @@ export const leadSchema = z.object({
   interestedService: optionalText,
   estimatedBudget: z.number().nonnegative().default(0),
   leadOwner: optionalText,
+  leadOwnerId: optionalText,
   status: z.enum(['New', 'Assigned', 'Contacted', 'Requirement Collected', 'Qualified', 'Opportunity Created', 'Won', 'Unqualified', 'Converted']),
   priority: z.enum(['High', 'Medium', 'Low', 'Urgent']),
   nextFollowUp: dateText,
@@ -65,7 +66,19 @@ export const activitySchema = relatedRecord.extend({
   type: requiredText,
   date: dateText,
   time: optionalText,
-  status: requiredText
+  status: requiredText,
+  user: requiredText,
+  activityOwnerId: optionalText,
+  leadName: optionalText,
+  company: optionalText,
+  contactPerson: optionalText,
+  outcome: optionalText,
+  followUpDate: dateText,
+  channel: optionalText,
+  description: optionalText,
+  priority: z.enum(['High', 'Medium', 'Low']).default('Medium'),
+  category: z.enum(['Today', 'Overdue', 'Tomorrow', 'This Week']).default('Today'),
+  source: z.enum(['manual', 'system']).default('manual')
 });
 
 export const opportunitySchema = relatedRecord.extend({ name: requiredText, stage: requiredText });

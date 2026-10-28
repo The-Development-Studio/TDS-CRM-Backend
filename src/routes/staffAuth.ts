@@ -7,7 +7,7 @@ import { config, requireConfig } from '../config.js';
 import { getDatabase } from '../database.js';
 import { asyncHandler, HttpError } from '../http.js';
 import { hashStaffSessionToken, normalizeStaffRole, staffSessionCookie } from '../staffAuth.js';
-import { readStaffSession, requireStaffAdmin, requireStaffPage, staffRoute } from '../staffAuth.js';
+import { readStaffSession, requireStaffAdmin, requireStaffManager, requireStaffPage, staffRoute } from '../staffAuth.js';
 
 const staffPageIds = [
   'dashboard', 'leads', 'customers', 'activities', 'pipeline', 'reports', 'quotations', 'costing',
@@ -92,15 +92,18 @@ const serializeStaffUser = (user: Record<string, unknown>) => ({
   phone: String(user.phone ?? ''),
   active: user.active === true,
   profileCompleted: user.profileCompleted === true,
-  pageAccess: normalizeStaffRole(user.role) === 'manager'
+  pageAccess: normalizeStaffRole(user.role) === 'admin'
     ? [...staffPageIds]
+    : normalizeStaffRole(user.role) === 'manager'
+      ? staffAssignablePageIds
     : Array.isArray(user.pageAccess)
       ? [...new Set([
           'dashboard' as const,
+          'reports' as const,
           ...user.pageAccess.filter((page): page is typeof staffPageIds[number] =>
             staffAssignablePageIds.includes(page as typeof staffAssignablePageIds[number]))
         ])]
-      : ['dashboard']
+      : ['dashboard', 'reports']
 });
 
 export const staffAuthRouter = Router();
@@ -131,7 +134,7 @@ staffAuthRouter.post('/invitations', asyncHandler(async (request, response) => {
   const apiKey = requireConfig('RESEND_API_KEY');
   const from = requireConfig('RESEND_FROM_EMAIL');
   const email = values.email.toLowerCase();
-  const role = isBootstrap ? 'manager' : values.role ?? 'user';
+  const role = isBootstrap ? 'admin' : values.role ?? 'user';
   let reportingManagerId: ObjectId | null = null;
   if (role === 'user') {
     if (!values.reportingManagerId || !ObjectId.isValid(values.reportingManagerId)) {
@@ -194,7 +197,11 @@ staffAuthRouter.post('/accept-invitation', asyncHandler(async (request, response
         name: invitation.name,
         role: normalizeStaffRole(invitation.role),
         reportingManagerId: invitation.reportingManagerId instanceof ObjectId ? invitation.reportingManagerId : null,
-        pageAccess: normalizeStaffRole(invitation.role) === 'manager' ? [...staffPageIds] : ['dashboard'],
+        pageAccess: normalizeStaffRole(invitation.role) === 'admin'
+          ? [...staffPageIds]
+          : normalizeStaffRole(invitation.role) === 'manager'
+            ? staffAssignablePageIds
+            : ['dashboard', 'reports'],
         profileCompleted: false,
         jobTitle: '',
         department: '',
@@ -377,9 +384,13 @@ staffAuthRouter.put('/profile', staffRoute, asyncHandler(async (request, respons
   response.json({ data: serializeStaffUser(user) });
 }));
 
-staffAuthRouter.get('/users', requireStaffAdmin, asyncHandler(async (_request, response) => {
+staffAuthRouter.get('/users', requireStaffManager, asyncHandler(async (request, response) => {
   const db = await getDatabase();
-  const users = await db.collection('staff_users').find({}, {
+  const managerId = new ObjectId(request.staffUser?.id);
+  const filter = request.staffUser?.role === 'admin'
+    ? {}
+    : { $or: [{ _id: managerId }, { reportingManagerId: managerId }] };
+  const users = await db.collection('staff_users').find(filter, {
     projection: { passwordHash: 0, salt: 0 }
   }).sort({ name: 1 }).toArray();
   response.json({ data: users.map((user) => serializeStaffUser(user)) });
@@ -387,13 +398,24 @@ staffAuthRouter.get('/users', requireStaffAdmin, asyncHandler(async (_request, r
 
 staffAuthRouter.get('/assignees', requireStaffPage('leads'), asyncHandler(async (request, response) => {
   const db = await getDatabase();
+  const isAdmin = request.staffUser?.role === 'admin';
   const isManager = request.staffUser?.role === 'manager';
+  const currentUserId = new ObjectId(request.staffUser?.id);
   const users = await db.collection('staff_users').find(
-    isManager ? { active: true } : { _id: new ObjectId(request.staffUser?.id), active: true },
-    { projection: { name: 1, email: 1 } }
+    isAdmin
+      ? { active: true }
+      : isManager
+      ? { active: true, $or: [{ _id: currentUserId }, { reportingManagerId: currentUserId }] }
+      : { _id: currentUserId, active: true },
+    { projection: { name: 1, email: 1, role: 1 } }
   ).sort({ name: 1 }).toArray();
   response.json({
-    data: users.map((user) => ({ id: String(user._id), name: String(user.name ?? ''), email: String(user.email ?? '') }))
+    data: users.map((user) => ({
+      id: String(user._id),
+      name: String(user.name ?? ''),
+      email: String(user.email ?? ''),
+      role: normalizeStaffRole(user.role)
+    }))
   });
 }));
 
@@ -404,7 +426,7 @@ staffAuthRouter.put('/users/:id/page-access', requireStaffAdmin, asyncHandler(as
   const db = await getDatabase();
   const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
   if (!existing) throw new HttpError(404, 'Staff account not found');
-  if (normalizeStaffRole(existing.role) === 'manager') throw new HttpError(400, 'Manager access cannot be restricted');
+  if (normalizeStaffRole(existing.role) !== 'user') throw new HttpError(400, 'Administrator and manager access cannot be restricted');
   const user = await db.collection('staff_users').findOneAndUpdate(
     { _id: existing._id },
     { $set: { pageAccess: [...new Set(values.pageAccess)], updatedAt: new Date() } },
@@ -423,6 +445,7 @@ staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (re
   const db = await getDatabase();
   const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
   if (!existing) throw new HttpError(404, 'Staff account not found');
+  if (normalizeStaffRole(existing.role) === 'admin') throw new HttpError(400, 'Administrator roles cannot be changed here');
   if (normalizeStaffRole(existing.role) === 'manager' && values.role === 'user') {
     const directReportCount = await db.collection('staff_users').countDocuments({ reportingManagerId: existing._id });
     if (directReportCount > 0) throw new HttpError(400, "Reassign this manager's users before changing their role");
@@ -459,7 +482,7 @@ staffAuthRouter.put('/users/:id/active', requireStaffAdmin, asyncHandler(async (
   const db = await getDatabase();
   const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
   if (!existing) throw new HttpError(404, 'Staff account not found');
-  if (normalizeStaffRole(existing.role) === 'manager') throw new HttpError(400, 'Manager accounts cannot be deactivated here');
+  if (normalizeStaffRole(existing.role) !== 'user') throw new HttpError(400, 'Administrator and manager accounts cannot be deactivated here');
   const user = await db.collection('staff_users').findOneAndUpdate(
     { _id: existing._id },
     { $set: { active: values.active, updatedAt: new Date() } },
