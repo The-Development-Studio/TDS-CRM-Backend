@@ -54,8 +54,16 @@ staffDataRouter.get('/organization', staffRoute, asyncHandler(async (_request, r
 }));
 
 staffDataRouter.put('/organization', requireStaffPage('org-setup'), asyncHandler(async (request, response) => {
+  const {
+    id: _id,
+    _id: _mongoId,
+    organizationKey: _organizationKey,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    ...editableOrganization
+  } = request.body as Record<string, unknown>;
   const organization = resourceSchemas.organizations.parse({
-    ...request.body,
+    ...editableOrganization,
     organizationKey: 'default'
   }) as Record<string, unknown>;
   const db = await getDatabase();
