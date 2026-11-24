@@ -29,9 +29,9 @@ staffDataRouter.post('/import-local', requireStaffAdmin, asyncHandler(async (req
     }));
     const operations = prepared.map(({ id, values }) => ({
       updateOne: {
-        filter: { appId: id },
+        filter: { appId: id, tenantId: request.staffUser?.tenantId },
         update: {
-          $setOnInsert: { ...values, appId: id, createdAt: new Date(), updatedAt: new Date() }
+          $setOnInsert: { ...values, appId: id, tenantId: request.staffUser?.tenantId, createdAt: new Date(), updatedAt: new Date() }
         },
         upsert: true
       }
@@ -47,9 +47,9 @@ staffDataRouter.post('/import-local', requireStaffAdmin, asyncHandler(async (req
   response.status(201).json({ imported: results });
 }));
 
-staffDataRouter.get('/organization', staffRoute, asyncHandler(async (_request, response) => {
+staffDataRouter.get('/organization', staffRoute, asyncHandler(async (request, response) => {
   const db = await getDatabase();
-  const organization = await db.collection('organizations').findOne({ organizationKey: 'default' });
+  const organization = await db.collection('organizations').findOne({ tenantId: request.staffUser?.tenantId });
   response.json({ data: organization ? serializeDocument(organization) : null });
 }));
 
@@ -64,11 +64,12 @@ staffDataRouter.put('/organization', requireStaffPage('org-setup'), asyncHandler
   } = request.body as Record<string, unknown>;
   const organization = resourceSchemas.organizations.parse({
     ...editableOrganization,
-    organizationKey: 'default'
+    organizationKey: request.staffUser?.tenantId,
+    tenantId: request.staffUser?.tenantId
   }) as Record<string, unknown>;
   const db = await getDatabase();
   const saved = await db.collection('organizations').findOneAndUpdate(
-    { organizationKey: 'default' },
+    { tenantId: request.staffUser?.tenantId },
     { $set: { ...organization, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
     { upsert: true, returnDocument: 'after' }
   );

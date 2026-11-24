@@ -10,6 +10,7 @@ import { customerPortalRouter } from './routes/customerPortal.js';
 import { staffAuthRouter } from './routes/staffAuth.js';
 import { staffDataRouter } from './routes/staffData.js';
 import { documentsRouter } from './routes/documents.js';
+import { tenantsRouter } from './routes/tenants.js';
 import { resourceSchemas } from './schemas.js';
 import { requireStaffAnyPage, requireStaffPage, requireStaffSession } from './staffAuth.js';
 
@@ -46,6 +47,7 @@ app.use('/api', requireStaffSession);
 
 app.use('/api/customers', requireStaffPage('customers'), customer360Router);
 app.use('/api/staff-data', staffDataRouter);
+app.use('/api/tenants', tenantsRouter);
 
 const resourcePageAccess: Record<string, string[]> = {
   customers: ['customers', 'portal', 'costing'],

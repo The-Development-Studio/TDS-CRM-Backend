@@ -91,6 +91,8 @@ const serializeStaffUser = (user: Record<string, unknown>) => ({
   department: String(user.department ?? ''),
   phone: String(user.phone ?? ''),
   active: user.active === true,
+  tenantIds: Array.isArray(user.tenantIds) ? user.tenantIds.filter((tenantId): tenantId is string => typeof tenantId === 'string') : ['default'],
+  tenantId: Array.isArray(user.tenantIds) && typeof user.tenantIds[0] === 'string' ? user.tenantIds[0] : 'default',
   profileCompleted: user.profileCompleted === true,
   pageAccess: normalizeStaffRole(user.role) === 'admin'
     ? [...staffPageIds]
@@ -159,18 +161,22 @@ staffAuthRouter.post('/invitations', asyncHandler(async (request, response) => {
         reportingManagerId,
         tokenHash: hash(rawToken),
         expiresAt: new Date(Date.now() + invitationLifetimeMs),
-        createdAt: new Date()
+        createdAt: new Date(),
+        tenantId: isBootstrap ? 'default' : staffSession?.tenantId ?? 'default'
       }
     },
     { upsert: true }
   );
   const mailer = apiKey === config.RESEND_API_KEY ? resend : new Resend(apiKey);
   const frontendOrigin = config.CLIENT_ORIGIN.split(',')[0].trim();
+  const invitationTenantId = isBootstrap ? 'default' : staffSession?.tenantId ?? 'default';
+  const invitationTenant = await db.collection('organizations').findOne({ tenantId: invitationTenantId });
+  const workspacePath = typeof invitationTenant?.slug === 'string' ? `/t/${invitationTenant.slug}` : '/staff-login';
   const result = await mailer.emails.send({
     from,
     to: email,
     subject: 'Your TDS CRM staff invitation',
-    html: `<p>Hello ${values.name.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character)},</p><p><a href="${frontendOrigin}/staff-login?invite=${rawToken}">Accept your TDS CRM staff invitation</a></p><p>This link expires in 24 hours. Create a password of at least 12 characters to activate your account.</p>`
+    html: `<p>Hello ${values.name.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character)},</p><p><a href="${frontendOrigin}${workspacePath}?invite=${rawToken}">Accept your TDS CRM staff invitation</a></p><p>This link expires in 24 hours. Create a password of at least 12 characters to activate your account.</p>`
   });
   if (result.error) {
     await db.collection('staff_invitations').deleteOne({ tokenHash: hash(rawToken) });
@@ -210,7 +216,8 @@ staffAuthRouter.post('/accept-invitation', asyncHandler(async (request, response
         active: true,
         updatedAt: now
       },
-      $setOnInsert: { createdAt: now }
+      $setOnInsert: { createdAt: now },
+      $addToSet: { tenantIds: typeof invitation.tenantId === 'string' ? invitation.tenantId : 'default' }
     },
     { upsert: true }
   );
@@ -340,9 +347,11 @@ staffAuthRouter.post('/login', asyncHandler(async (request, response) => {
   await db.collection('staff_login_attempts').deleteOne({ key: attemptKey });
   const token = randomBytes(32).toString('hex');
   const now = new Date();
+  const activeTenantId = Array.isArray(user.tenantIds) && typeof user.tenantIds[0] === 'string' ? user.tenantIds[0] : 'default';
   await db.collection('staff_sessions').insertOne({
     tokenHash: hashStaffSessionToken(token),
     userId: user._id,
+    activeTenantId,
     createdAt: now,
     expiresAt: new Date(now.getTime() + sessionLifetimeMs)
   });
@@ -353,7 +362,7 @@ staffAuthRouter.post('/login', asyncHandler(async (request, response) => {
     path: '/api',
     maxAge: sessionLifetimeMs
   });
-  response.json({ data: serializeStaffUser(user) });
+  response.json({ data: { ...serializeStaffUser(user), tenantId: activeTenantId } });
 }));
 
 staffAuthRouter.get('/session', asyncHandler(async (request, response) => {
@@ -369,7 +378,7 @@ staffAuthRouter.get('/session', asyncHandler(async (request, response) => {
   if (!session) throw new HttpError(401, 'Staff sign-in required');
   const user = await db.collection('staff_users').findOne({ _id: session.userId, active: true });
   if (!user) throw new HttpError(401, 'Staff account is inactive');
-  response.json({ data: serializeStaffUser(user) });
+  response.json({ data: { ...serializeStaffUser(user), tenantId: typeof session.activeTenantId === 'string' ? session.activeTenantId : 'default' } });
 }));
 
 staffAuthRouter.put('/profile', staffRoute, asyncHandler(async (request, response) => {
@@ -388,8 +397,8 @@ staffAuthRouter.get('/users', requireStaffManager, asyncHandler(async (request, 
   const db = await getDatabase();
   const managerId = new ObjectId(request.staffUser?.id);
   const filter = request.staffUser?.role === 'admin'
-    ? {}
-    : { $or: [{ _id: managerId }, { reportingManagerId: managerId }] };
+    ? { tenantIds: request.staffUser.tenantId }
+    : { tenantIds: request.staffUser?.tenantId, $or: [{ _id: managerId }, { reportingManagerId: managerId }] };
   const users = await db.collection('staff_users').find(filter, {
     projection: { passwordHash: 0, salt: 0 }
   }).sort({ name: 1 }).toArray();
@@ -403,10 +412,10 @@ staffAuthRouter.get('/assignees', requireStaffPage('leads'), asyncHandler(async 
   const currentUserId = new ObjectId(request.staffUser?.id);
   const users = await db.collection('staff_users').find(
     isAdmin
-      ? { active: true }
+      ? { active: true, tenantIds: request.staffUser?.tenantId }
       : isManager
-      ? { active: true, $or: [{ _id: currentUserId }, { reportingManagerId: currentUserId }] }
-      : { _id: currentUserId, active: true },
+      ? { active: true, tenantIds: request.staffUser?.tenantId, $or: [{ _id: currentUserId }, { reportingManagerId: currentUserId }] }
+      : { _id: currentUserId, active: true, tenantIds: request.staffUser?.tenantId },
     { projection: { name: 1, email: 1, role: 1 } }
   ).sort({ name: 1 }).toArray();
   response.json({
@@ -424,7 +433,7 @@ staffAuthRouter.put('/users/:id/page-access', requireStaffAdmin, asyncHandler(as
   if (!ObjectId.isValid(id)) throw new HttpError(400, 'Invalid staff account ID');
   const values = pageAccessSchema.parse(request.body);
   const db = await getDatabase();
-  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
+  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id), tenantIds: request.staffUser?.tenantId });
   if (!existing) throw new HttpError(404, 'Staff account not found');
   if (normalizeStaffRole(existing.role) !== 'user') throw new HttpError(400, 'Administrator and manager access cannot be restricted');
   const user = await db.collection('staff_users').findOneAndUpdate(
@@ -443,11 +452,11 @@ staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (re
     throw new HttpError(400, 'You cannot change your own role to user');
   }
   const db = await getDatabase();
-  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
+  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id), tenantIds: request.staffUser?.tenantId });
   if (!existing) throw new HttpError(404, 'Staff account not found');
   if (normalizeStaffRole(existing.role) === 'admin') throw new HttpError(400, 'Administrator roles cannot be changed here');
   if (normalizeStaffRole(existing.role) === 'manager' && values.role === 'user') {
-    const directReportCount = await db.collection('staff_users').countDocuments({ reportingManagerId: existing._id });
+    const directReportCount = await db.collection('staff_users').countDocuments({ reportingManagerId: existing._id, tenantIds: request.staffUser?.tenantId });
     if (directReportCount > 0) throw new HttpError(400, "Reassign this manager's users before changing their role");
   }
 
@@ -459,6 +468,7 @@ staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (re
     reportingManagerId = new ObjectId(values.reportingManagerId);
     const reportingManager = await db.collection('staff_users').findOne({
       _id: reportingManagerId,
+      tenantIds: request.staffUser?.tenantId,
       active: true,
       role: { $in: ['manager', 'admin'] }
     });
@@ -480,7 +490,7 @@ staffAuthRouter.put('/users/:id/active', requireStaffAdmin, asyncHandler(async (
   const values = accountStatusSchema.parse(request.body);
   if (request.staffUser?.id === id && !values.active) throw new HttpError(400, 'You cannot deactivate your own account');
   const db = await getDatabase();
-  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id) });
+  const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id), tenantIds: request.staffUser?.tenantId });
   if (!existing) throw new HttpError(404, 'Staff account not found');
   if (normalizeStaffRole(existing.role) !== 'user') throw new HttpError(400, 'Administrator and manager accounts cannot be deactivated here');
   const user = await db.collection('staff_users').findOneAndUpdate(

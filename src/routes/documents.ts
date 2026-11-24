@@ -23,7 +23,7 @@ documentsRouter.get('/', asyncHandler(async (request, response) => {
   const db = await getDatabase();
   const limit = Math.min(Math.max(Number(request.query.limit) || 100, 1), 10000);
   const records = await db.collection('documents')
-    .find({ storageKey: { $type: 'string' } })
+    .find({ tenantId: request.staffUser?.tenantId, storageKey: { $type: 'string' } })
     .sort({ updatedAt: -1 })
     .limit(limit)
     .toArray();
@@ -43,13 +43,14 @@ documentsRouter.post('/upload-url', asyncHandler(async (request, response) => {
   const values = uploadSchema.parse(request.body);
   validateDocumentSize(values.size);
   const db = await getDatabase();
-  const existing = await db.collection('documents').findOne({ appId: values.id });
+  const existing = await db.collection('documents').findOne({ appId: values.id, tenantId: request.staffUser?.tenantId });
   if (existing && typeof existing.storageKey === 'string') throw new HttpError(409, 'A document with this ID already exists');
 
   let customerId = 'internal';
   if (values.client && values.client.toLowerCase() !== 'internal') {
     const escapedClient = values.client.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const customer = await db.collection('customers').findOne({
+      tenantId: request.staffUser?.tenantId,
       $or: [
         { companyName: { $regex: `^${escapedClient}$`, $options: 'i' } },
         { customerCode: { $regex: `^${escapedClient}$`, $options: 'i' } }
@@ -61,10 +62,11 @@ documentsRouter.post('/upload-url', asyncHandler(async (request, response) => {
   const { storageKey, uploadUrl } = await createDocumentUpload(values.mimeType, values.size);
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   await db.collection('document_uploads').updateOne(
-    { appId: values.id },
+    { appId: values.id, tenantId: request.staffUser?.tenantId },
     {
       $set: {
         appId: values.id,
+        tenantId: request.staffUser?.tenantId,
         storageKey,
         name: values.name,
         category: values.category,
@@ -86,6 +88,7 @@ documentsRouter.post('/confirm-upload', asyncHandler(async (request, response) =
   const db = await getDatabase();
   const pending = await db.collection('document_uploads').findOne({
     appId: id,
+    tenantId: request.staffUser?.tenantId,
     expiresAt: { $gt: new Date() }
   });
   if (!pending) throw new HttpError(404, 'Document upload not found or expired');
@@ -106,9 +109,9 @@ documentsRouter.post('/confirm-upload', asyncHandler(async (request, response) =
   });
   const now = new Date();
   await db.collection('documents').updateOne(
-    { appId: id },
+    { appId: id, tenantId: request.staffUser?.tenantId },
     {
-      $set: { ...values, appId: id, updatedAt: now },
+      $set: { ...values, appId: id, tenantId: request.staffUser?.tenantId, updatedAt: now },
       $setOnInsert: { createdAt: now }
     },
     { upsert: true }
@@ -121,6 +124,7 @@ documentsRouter.get('/:id/download-url', asyncHandler(async (request, response) 
   const db = await getDatabase();
   const id = String(request.params.id);
   const document = await db.collection('documents').findOne({
+    tenantId: request.staffUser?.tenantId,
     $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])]
   });
   if (!document || typeof document.storageKey !== 'string') throw new HttpError(404, 'Document not found');
@@ -132,6 +136,7 @@ documentsRouter.delete('/:id', asyncHandler(async (request, response) => {
   const db = await getDatabase();
   const id = String(request.params.id);
   const filter: Filter<Record<string, unknown>> = {
+    tenantId: request.staffUser?.tenantId,
     $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])]
   };
   const document = await db.collection('documents').findOne(filter);

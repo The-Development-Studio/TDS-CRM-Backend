@@ -92,7 +92,7 @@ const findPortalSession = async (cookieHeader = '') => {
   });
   if (!user) return null;
 
-  return { customerId: String(session.customerId), email: user.email as string };
+  return { customerId: String(session.customerId), email: user.email as string, tenantId: String(session.tenantId ?? user.tenantId ?? 'default') };
 };
 
 export const customerPortalRouter = Router();
@@ -106,7 +106,8 @@ customerPortalRouter.post('/invitations', requireStaffAdmin, asyncHandler(async 
   const apiKey = requireConfig('RESEND_API_KEY');
   const from = requireConfig('RESEND_FROM_EMAIL');
   const existingCustomer = await db.collection('customers').findOne({
-    customerCode: values.customer.customerCode
+    customerCode: values.customer.customerCode,
+    tenantId: request.staffUser?.tenantId
   });
   const existingCustomerId = existingCustomer ? String(existingCustomer._id) : '';
   const existingUser = await db.collection('portal_users').findOne({ email });
@@ -119,12 +120,13 @@ customerPortalRouter.post('/invitations', requireStaffAdmin, asyncHandler(async 
 
   const now = new Date();
   await db.collection('customers').updateOne(
-    { customerCode: values.customer.customerCode },
+    { customerCode: values.customer.customerCode, tenantId: request.staffUser?.tenantId },
     {
       $set: {
         companyName: values.customer.companyName,
         primaryContact: values.customer.primaryContact,
         email,
+        tenantId: request.staffUser?.tenantId,
         updatedAt: now
       },
       $setOnInsert: {
@@ -143,7 +145,7 @@ customerPortalRouter.post('/invitations', requireStaffAdmin, asyncHandler(async 
     },
     { upsert: true }
   );
-  const customer = await db.collection('customers').findOne({ customerCode: values.customer.customerCode });
+  const customer = await db.collection('customers').findOne({ customerCode: values.customer.customerCode, tenantId: request.staffUser?.tenantId });
   if (!customer) throw new HttpError(500, 'Could not create the customer portal account');
   const customerId = String(customer._id);
   if (existingUser && String(existingUser.customerId) !== customerId) {
@@ -158,6 +160,7 @@ customerPortalRouter.post('/invitations', requireStaffAdmin, asyncHandler(async 
       $set: {
         email,
         customerId,
+        tenantId: request.staffUser?.tenantId,
         tokenHash: hash(rawToken),
         expiresAt,
         createdAt: new Date()
@@ -198,6 +201,7 @@ customerPortalRouter.post('/accept-invitation', asyncHandler(async (request, res
       $set: {
         email: invitation.email,
         customerId: invitation.customerId,
+        tenantId: invitation.tenantId ?? 'default',
         ...password,
         active: true,
         updatedAt: now
@@ -249,6 +253,7 @@ customerPortalRouter.post('/login', asyncHandler(async (request, response) => {
     tokenHash: hash(token),
     userId: user._id,
     customerId: user.customerId,
+    tenantId: user.tenantId ?? 'default',
     createdAt: now,
     expiresAt: new Date(now.getTime() + sessionDurationMs)
   });
@@ -263,7 +268,7 @@ customerPortalRouter.get('/session', asyncHandler(async (request, response) => {
     throw new HttpError(401, 'Customer portal sign-in required');
   }
   const db = await getDatabase();
-  const customer = await db.collection('customers').findOne({ _id: parseObjectId(session.customerId) });
+  const customer = await db.collection('customers').findOne({ _id: parseObjectId(session.customerId), tenantId: session.tenantId });
   if (!customer) throw new HttpError(401, 'Customer portal account is no longer active');
   response.json({ data: { email: session.email, customer: serializeDocument(customer) } });
 }));
@@ -283,13 +288,14 @@ customerPortalRouter.get('/data', asyncHandler(async (request, response) => {
   if (!session) throw new HttpError(401, 'Customer portal sign-in required');
   const db = await getDatabase();
   const customerId = session.customerId;
+  const tenantId = session.tenantId;
   const [projects, proposals, contracts, invoices, supportTickets, documents] = await Promise.all([
-    db.collection('projects').find({ customerId }).sort({ updatedAt: -1 }).limit(100).toArray(),
-    db.collection('proposals').find({ customerId }).sort({ updatedAt: -1 }).limit(100).toArray(),
-    db.collection('contracts').find({ customerId }).sort({ expiryDate: 1 }).limit(100).toArray(),
-    db.collection('invoices').find({ customerId }).sort({ issueDate: -1 }).limit(100).toArray(),
-    db.collection('support_tickets').find({ customerId }).sort({ updatedAt: -1 }).limit(100).toArray(),
-    db.collection('documents').find({ customerId, storageKey: { $type: 'string' } })
+    db.collection('projects').find({ customerId, tenantId }).sort({ updatedAt: -1 }).limit(100).toArray(),
+    db.collection('proposals').find({ customerId, tenantId }).sort({ updatedAt: -1 }).limit(100).toArray(),
+    db.collection('contracts').find({ customerId, tenantId }).sort({ expiryDate: 1 }).limit(100).toArray(),
+    db.collection('invoices').find({ customerId, tenantId }).sort({ issueDate: -1 }).limit(100).toArray(),
+    db.collection('support_tickets').find({ customerId, tenantId }).sort({ updatedAt: -1 }).limit(100).toArray(),
+    db.collection('documents').find({ customerId, tenantId, storageKey: { $type: 'string' } })
       .project({ appId: 1, name: 1, category: 1, mimeType: 1, size: 1, updatedAt: 1 })
       .sort({ updatedAt: -1 }).limit(100).toArray()
   ]);
@@ -313,6 +319,7 @@ customerPortalRouter.get('/documents/:id/download-url', asyncHandler(async (requ
   const db = await getDatabase();
   const document = await db.collection('documents').findOne({
     customerId: session.customerId,
+    tenantId: session.tenantId,
     $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])]
   });
   if (!document || typeof document.storageKey !== 'string') throw new HttpError(404, 'Document not found');
@@ -325,13 +332,14 @@ customerPortalRouter.post('/tickets', asyncHandler(async (request, response) => 
   if (!session) throw new HttpError(401, 'Customer portal sign-in required');
   const values = ticketSchema.parse(request.body);
   const db = await getDatabase();
-  const customer = await db.collection('customers').findOne({ _id: parseObjectId(session.customerId) });
+  const customer = await db.collection('customers').findOne({ _id: parseObjectId(session.customerId), tenantId: session.tenantId });
   if (!customer) throw new HttpError(401, 'Customer portal account is no longer active');
 
   const now = new Date();
   const ticket = {
     ticketNo: `TKT-${now.getFullYear()}-${randomBytes(3).toString('hex').toUpperCase()}`,
     customerId: session.customerId,
+    tenantId: session.tenantId,
     customer: customer.companyName,
     createdBy: session.email,
     ...values,

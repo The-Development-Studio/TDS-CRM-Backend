@@ -25,7 +25,9 @@ export const emailRouter = Router();
 emailRouter.get('/', asyncHandler(async (request, response) => {
   const db = await getDatabase();
   const customerId = typeof request.query.customerId === 'string' ? request.query.customerId : '';
-  const filter = customerId ? { customerId } : {};
+  const filter = customerId
+    ? { customerId, tenantId: request.staffUser?.tenantId }
+    : { tenantId: request.staffUser?.tenantId };
   const messages = await db.collection('email_messages').find(filter).sort({ createdAt: -1 }).limit(200).toArray();
   response.json({ data: messages.map(serializeDocument), count: messages.length });
 }));
@@ -33,7 +35,7 @@ emailRouter.get('/', asyncHandler(async (request, response) => {
 emailRouter.post('/send', asyncHandler(async (request, response) => {
   const values = sendEmailSchema.parse(request.body);
   const db = await getDatabase();
-  const existing = await db.collection('email_messages').findOne({ idempotencyKey: values.idempotencyKey });
+  const existing = await db.collection('email_messages').findOne({ idempotencyKey: values.idempotencyKey, tenantId: request.staffUser?.tenantId });
   if (existing) {
     response.status(existing.status === 'failed' ? 409 : 200).json({ data: serializeDocument(existing), duplicate: true });
     return;
@@ -44,6 +46,7 @@ emailRouter.post('/send', asyncHandler(async (request, response) => {
   const now = new Date();
   const auditRecord = {
     ...values,
+    tenantId: request.staffUser?.tenantId,
     from,
     status: 'sending',
     createdAt: now,
@@ -81,6 +84,7 @@ emailRouter.post('/send', asyncHandler(async (request, response) => {
 
     if (values.customerId) {
       await db.collection('activities').insertOne({
+        tenantId: request.staffUser?.tenantId,
         customerId: values.customerId,
         type: 'Email',
         title: values.subject,

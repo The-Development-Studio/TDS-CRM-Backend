@@ -26,6 +26,12 @@ export const readStaffSession = async (request: Request) => {
 
   const user = await db.collection('staff_users').findOne({ _id: session.userId, active: true });
   if (!user) return null;
+  const tenantIds = Array.isArray(user.tenantIds)
+    ? user.tenantIds.filter((tenantId): tenantId is string => typeof tenantId === 'string')
+    : ['default'];
+  const tenantId = typeof session.activeTenantId === 'string' && tenantIds.includes(session.activeTenantId)
+    ? session.activeTenantId
+    : tenantIds[0] ?? 'default';
   const role = normalizeStaffRole(user.role);
   const storedPageAccess = Array.isArray(user.pageAccess)
     ? user.pageAccess.filter((page): page is string => typeof page === 'string' && (role === 'admin' || page !== 'admin'))
@@ -36,7 +42,10 @@ export const readStaffSession = async (request: Request) => {
     name: user.name as string,
     role,
     reportingManagerId: user.reportingManagerId instanceof ObjectId ? String(user.reportingManagerId) : null,
-    pageAccess: role === 'admin' || role === 'manager' ? storedPageAccess : [...new Set(['dashboard', 'reports', ...storedPageAccess])]
+    pageAccess: role === 'admin' || role === 'manager' ? storedPageAccess : [...new Set(['dashboard', 'reports', ...storedPageAccess])],
+    tenantId,
+    tenantIds,
+    objectId: user._id
   };
 };
 
@@ -107,7 +116,7 @@ export const requireStaffManager = asyncHandler(async (request, _response, next)
 declare global {
   namespace Express {
     interface Request {
-      staffUser?: { id: string; email: string; name: string; role: StaffRole; reportingManagerId: string | null; pageAccess: string[] };
+      staffUser?: { id: string; email: string; name: string; role: StaffRole; reportingManagerId: string | null; pageAccess: string[]; tenantId: string; tenantIds: string[]; objectId: ObjectId };
     }
   }
 }

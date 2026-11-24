@@ -30,6 +30,7 @@ const ownershipScope = async (
   const managerId = new ObjectId(staffUser.id);
   const team = await db.collection('staff_users').find({
     active: true,
+    tenantIds: staffUser.tenantId,
     $or: [{ _id: managerId }, { reportingManagerId: managerId }]
   }, { projection: { _id: 1, name: 1 } }).toArray();
   const names = team.map((user) => String(user.name ?? '')).filter(Boolean);
@@ -59,6 +60,7 @@ const canUseOwner = async (
   return Boolean(await db.collection('staff_users').findOne({
     ...identity,
     active: true,
+    tenantIds: staffUser.tenantId,
     $or: [{ _id: managerId }, { reportingManagerId: managerId }]
   }));
 };
@@ -73,7 +75,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
   router.get('/', asyncHandler(async (request, response) => {
     const db = await getDatabase();
     const limit = Math.min(Math.max(Number(request.query.limit) || 100, 1), 10000);
-    const filter: Filter<Record<string, unknown>> = {};
+    const filter: Filter<Record<string, unknown>> = { tenantId: request.staffUser?.tenantId };
     const search = typeof request.query.search === 'string' ? request.query.search.trim() : '';
     const customerId = typeof request.query.customerId === 'string' ? request.query.customerId : '';
 
@@ -104,9 +106,9 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
       const values = schema.parse(record) as Record<string, unknown>;
       return {
         updateOne: {
-          filter: scope ? { $and: [{ appId: id }, scope] } : { appId: id },
+          filter: scope ? { $and: [{ appId: id, tenantId: request.staffUser?.tenantId }, scope] } : { appId: id, tenantId: request.staffUser?.tenantId },
           update: {
-            $set: { ...values, appId: id, updatedAt: new Date() },
+            $set: { ...values, appId: id, tenantId: request.staffUser?.tenantId, updatedAt: new Date() },
             $setOnInsert: { createdAt: new Date() }
           },
           upsert: true
@@ -117,6 +119,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
     if (input.deleteIds.length) {
       await db.collection(resource).deleteMany({
         appId: { $in: input.deleteIds },
+        tenantId: request.staffUser?.tenantId,
         ...(scope ? { $and: [scope] } : {})
       });
     }
@@ -132,7 +135,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
     }
     const now = new Date();
     const appId = typeof request.body?.id === 'string' ? request.body.id : undefined;
-    const result = await db.collection(resource).insertOne({ ...values, ...(appId ? { appId } : {}), createdAt: now, updatedAt: now });
+    const result = await db.collection(resource).insertOne({ ...values, ...(appId ? { appId } : {}), tenantId: request.staffUser?.tenantId, createdAt: now, updatedAt: now });
     const created = await db.collection(resource).findOne({ _id: result.insertedId });
     response.status(201).json({ data: serializeDocument(created) });
   }));
@@ -143,7 +146,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
     const scope = await ownershipScope(db, request.staffUser, userOwnershipField, userOwnershipIdField);
     const record = await db.collection(resource).findOne({
       $and: [
-        { $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
+        { tenantId: request.staffUser?.tenantId, $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
         ...(scope ? [scope] : [])
       ]
     });
@@ -164,7 +167,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
     const record = await db.collection(resource).findOneAndUpdate(
       {
         $and: [
-          { $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
+          { tenantId: request.staffUser?.tenantId, $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
           ...(scope ? [scope] : [])
         ]
       },
@@ -181,7 +184,7 @@ export const createCrudRouter = ({ resource, schema, searchFields = [], userOwne
     const scope = await ownershipScope(db, request.staffUser, userOwnershipField, userOwnershipIdField);
     const result = await db.collection(resource).deleteOne({
       $and: [
-        { $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
+        { tenantId: request.staffUser?.tenantId, $or: [{ appId: id }, ...(ObjectId.isValid(id) ? [{ _id: parseObjectId(id) }] : [])] },
         ...(scope ? [scope] : [])
       ]
     });
