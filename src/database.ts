@@ -37,6 +37,10 @@ export const createIndexes = async () => {
       { tenantIds: { $exists: false } },
       { $set: { tenantIds: ['default'] } }
     ),
+    db.collection('staff_users').updateMany(
+      { role: 'admin', tenantAdminIds: { $exists: false } },
+      [{ $set: { tenantAdminIds: { $ifNull: ['$tenantIds', ['default']] } } }]
+    ),
     db.collection('organizations').updateMany(
       { tenantId: { $exists: false } },
       { $set: { tenantId: 'default', slug: 'default', name: 'Default Organization', status: 'Active', theme: { primaryColor: '#ff5c00', sidebarTone: 'light', density: 'comfortable' } } }

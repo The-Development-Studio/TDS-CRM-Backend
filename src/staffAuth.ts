@@ -32,7 +32,10 @@ export const readStaffSession = async (request: Request) => {
   const tenantId = typeof session.activeTenantId === 'string' && tenantIds.includes(session.activeTenantId)
     ? session.activeTenantId
     : tenantIds[0] ?? 'default';
-  const role = normalizeStaffRole(user.role);
+  const tenantAdminIds = Array.isArray(user.tenantAdminIds)
+    ? user.tenantAdminIds.filter((adminTenantId): adminTenantId is string => typeof adminTenantId === 'string')
+    : normalizeStaffRole(user.role) === 'admin' ? tenantIds : [];
+  const role = tenantAdminIds.includes(tenantId) ? 'admin' : normalizeStaffRole(user.role);
   const storedPageAccess = Array.isArray(user.pageAccess)
     ? user.pageAccess.filter((page): page is string => typeof page === 'string' && (role === 'admin' || page !== 'admin'))
     : [];
@@ -76,9 +79,7 @@ export const staffRoute = asyncHandler(async (request, _response, next) => {
 export const requireStaffAdmin = asyncHandler(async (request, _response, next) => {
   const session = await readStaffSession(request);
   if (!session) throw new HttpError(401, 'Staff sign-in required');
-  const db = await getDatabase();
-  const user = await db.collection('staff_users').findOne({ _id: new ObjectId(session.id) });
-  if (!user || normalizeStaffRole(user.role) !== 'admin') throw new HttpError(403, 'Administrator access required');
+  if (session.role !== 'admin') throw new HttpError(403, 'Tenant administrator access required');
   request.staffUser = session;
   next();
 });

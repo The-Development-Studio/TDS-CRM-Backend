@@ -15,6 +15,10 @@ const tenantSchema = z.object({
   name: z.string().trim().min(2).max(120),
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(48),
   status: z.enum(['Active', 'Suspended']).default('Active'),
+  logoDataUrl: z.union([
+    z.string().max(700_000).regex(/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/),
+    z.literal('')
+  ]).optional().default(''),
   theme: themeSchema
 });
 
@@ -54,7 +58,7 @@ tenantsRouter.post('/', requireStaffAdmin, asyncHandler(async (request, response
   });
   await db.collection('staff_users').updateOne(
     { _id: request.staffUser?.objectId },
-    { $addToSet: { tenantIds: tenantId }, $set: { updatedAt: now } }
+    { $addToSet: { tenantIds: tenantId, tenantAdminIds: tenantId }, $set: { updatedAt: now } }
   );
   response.status(201).json({ data: { ...values, id: tenantId, tenantId } });
 }));

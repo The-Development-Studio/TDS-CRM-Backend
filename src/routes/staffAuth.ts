@@ -21,7 +21,7 @@ const invitationSchema = z.object({
   email: z.string().trim().email(),
   name: z.string().trim().min(1).max(120),
   adminKey: z.string().min(1).optional(),
-  role: z.enum(['manager', 'user']).optional(),
+  role: z.enum(['admin', 'manager', 'user']).optional(),
   reportingManagerId: z.string().trim().optional()
 }).superRefine((values, context) => {
   if (values.role === 'user' && !values.reportingManagerId) {
@@ -81,11 +81,13 @@ const invitationLifetimeMs = 24 * 60 * 60 * 1000;
 const passwordResetLifetimeMs = 60 * 60 * 1000;
 const passwordResetCooldownMs = 5 * 60 * 1000;
 const passwordResetResponse = 'If an active staff account exists for that email, a password reset link has been sent.';
-const serializeStaffUser = (user: Record<string, unknown>) => ({
+const serializeStaffUser = (user: Record<string, unknown>, tenantId = 'default') => ({
   id: String(user._id),
   email: String(user.email ?? ''),
   name: String(user.name ?? ''),
-  role: normalizeStaffRole(user.role),
+  role: Array.isArray(user.tenantAdminIds) && user.tenantAdminIds.includes(tenantId)
+    ? 'admin' as const
+    : normalizeStaffRole(user.role),
   reportingManagerId: user.reportingManagerId instanceof ObjectId ? String(user.reportingManagerId) : null,
   jobTitle: String(user.jobTitle ?? ''),
   department: String(user.department ?? ''),
@@ -94,7 +96,7 @@ const serializeStaffUser = (user: Record<string, unknown>) => ({
   tenantIds: Array.isArray(user.tenantIds) ? user.tenantIds.filter((tenantId): tenantId is string => typeof tenantId === 'string') : ['default'],
   tenantId: Array.isArray(user.tenantIds) && typeof user.tenantIds[0] === 'string' ? user.tenantIds[0] : 'default',
   profileCompleted: user.profileCompleted === true,
-  pageAccess: normalizeStaffRole(user.role) === 'admin'
+  pageAccess: Array.isArray(user.tenantAdminIds) && user.tenantAdminIds.includes(tenantId)
     ? [...staffPageIds]
     : normalizeStaffRole(user.role) === 'manager'
       ? staffAssignablePageIds
@@ -127,8 +129,7 @@ staffAuthRouter.post('/invitations', asyncHandler(async (request, response) => {
   } else if (!staffSession) {
     throw new HttpError(401, 'Staff sign-in required to invite staff');
   } else {
-    const manager = await staffUsers.findOne({ _id: new ObjectId(staffSession.id), role: { $in: ['manager', 'admin'] }, active: true });
-    if (!manager) throw new HttpError(403, 'Manager access required');
+    if (!['manager', 'admin'].includes(staffSession.role)) throw new HttpError(403, 'Manager access required');
   }
   if (!config.RESEND_API_KEY || !config.RESEND_FROM_EMAIL) {
     throw new HttpError(503, 'Staff invitations require RESEND_API_KEY and RESEND_FROM_EMAIL to be configured on the backend');
@@ -201,7 +202,7 @@ staffAuthRouter.post('/accept-invitation', asyncHandler(async (request, response
       $set: {
         email: invitation.email,
         name: invitation.name,
-        role: normalizeStaffRole(invitation.role),
+        role: normalizeStaffRole(invitation.role) === 'admin' ? 'user' : normalizeStaffRole(invitation.role),
         reportingManagerId: invitation.reportingManagerId instanceof ObjectId ? invitation.reportingManagerId : null,
         pageAccess: normalizeStaffRole(invitation.role) === 'admin'
           ? [...staffPageIds]
@@ -217,7 +218,12 @@ staffAuthRouter.post('/accept-invitation', asyncHandler(async (request, response
         updatedAt: now
       },
       $setOnInsert: { createdAt: now },
-      $addToSet: { tenantIds: typeof invitation.tenantId === 'string' ? invitation.tenantId : 'default' }
+      $addToSet: {
+        tenantIds: typeof invitation.tenantId === 'string' ? invitation.tenantId : 'default',
+        ...(normalizeStaffRole(invitation.role) === 'admin'
+          ? { tenantAdminIds: typeof invitation.tenantId === 'string' ? invitation.tenantId : 'default' }
+          : {})
+      }
     },
     { upsert: true }
   );
@@ -362,7 +368,7 @@ staffAuthRouter.post('/login', asyncHandler(async (request, response) => {
     path: '/api',
     maxAge: sessionLifetimeMs
   });
-  response.json({ data: { ...serializeStaffUser(user), tenantId: activeTenantId } });
+  response.json({ data: { ...serializeStaffUser(user, activeTenantId), tenantId: activeTenantId } });
 }));
 
 staffAuthRouter.get('/session', asyncHandler(async (request, response) => {
@@ -378,7 +384,8 @@ staffAuthRouter.get('/session', asyncHandler(async (request, response) => {
   if (!session) throw new HttpError(401, 'Staff sign-in required');
   const user = await db.collection('staff_users').findOne({ _id: session.userId, active: true });
   if (!user) throw new HttpError(401, 'Staff account is inactive');
-  response.json({ data: { ...serializeStaffUser(user), tenantId: typeof session.activeTenantId === 'string' ? session.activeTenantId : 'default' } });
+  const activeTenantId = typeof session.activeTenantId === 'string' ? session.activeTenantId : 'default';
+  response.json({ data: { ...serializeStaffUser(user, activeTenantId), tenantId: activeTenantId } });
 }));
 
 staffAuthRouter.put('/profile', staffRoute, asyncHandler(async (request, response) => {
@@ -390,7 +397,7 @@ staffAuthRouter.put('/profile', staffRoute, asyncHandler(async (request, respons
     { returnDocument: 'after' }
   );
   if (!user) throw new HttpError(404, 'Staff account not found');
-  response.json({ data: serializeStaffUser(user) });
+  response.json({ data: serializeStaffUser(user, request.staffUser?.tenantId) });
 }));
 
 staffAuthRouter.get('/users', requireStaffManager, asyncHandler(async (request, response) => {
@@ -402,7 +409,7 @@ staffAuthRouter.get('/users', requireStaffManager, asyncHandler(async (request, 
   const users = await db.collection('staff_users').find(filter, {
     projection: { passwordHash: 0, salt: 0 }
   }).sort({ name: 1 }).toArray();
-  response.json({ data: users.map((user) => serializeStaffUser(user)) });
+  response.json({ data: users.map((user) => serializeStaffUser(user, request.staffUser?.tenantId)) });
 }));
 
 staffAuthRouter.get('/assignees', requireStaffPage('leads'), asyncHandler(async (request, response) => {
@@ -423,7 +430,9 @@ staffAuthRouter.get('/assignees', requireStaffPage('leads'), asyncHandler(async 
       id: String(user._id),
       name: String(user.name ?? ''),
       email: String(user.email ?? ''),
-      role: normalizeStaffRole(user.role)
+      role: Array.isArray(user.tenantAdminIds) && user.tenantAdminIds.includes(request.staffUser?.tenantId)
+        ? 'admin'
+        : normalizeStaffRole(user.role)
     }))
   });
 }));
@@ -441,7 +450,7 @@ staffAuthRouter.put('/users/:id/page-access', requireStaffAdmin, asyncHandler(as
     { $set: { pageAccess: [...new Set(values.pageAccess)], updatedAt: new Date() } },
     { returnDocument: 'after' }
   );
-  response.json({ data: serializeStaffUser(user as Record<string, unknown>) });
+  response.json({ data: serializeStaffUser(user as Record<string, unknown>, request.staffUser?.tenantId) });
 }));
 
 staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (request, response) => {
@@ -454,7 +463,7 @@ staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (re
   const db = await getDatabase();
   const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id), tenantIds: request.staffUser?.tenantId });
   if (!existing) throw new HttpError(404, 'Staff account not found');
-  if (normalizeStaffRole(existing.role) === 'admin') throw new HttpError(400, 'Administrator roles cannot be changed here');
+  if (Array.isArray(existing.tenantAdminIds) && existing.tenantAdminIds.includes(request.staffUser?.tenantId)) throw new HttpError(400, 'Tenant administrator roles cannot be changed here');
   if (normalizeStaffRole(existing.role) === 'manager' && values.role === 'user') {
     const directReportCount = await db.collection('staff_users').countDocuments({ reportingManagerId: existing._id, tenantIds: request.staffUser?.tenantId });
     if (directReportCount > 0) throw new HttpError(400, "Reassign this manager's users before changing their role");
@@ -481,7 +490,7 @@ staffAuthRouter.put('/users/:id/role', requireStaffAdmin, asyncHandler(async (re
     { returnDocument: 'after' }
   );
   await db.collection('staff_sessions').deleteMany({ userId: existing._id });
-  response.json({ data: serializeStaffUser(user as Record<string, unknown>) });
+  response.json({ data: serializeStaffUser(user as Record<string, unknown>, request.staffUser?.tenantId) });
 }));
 
 staffAuthRouter.put('/users/:id/active', requireStaffAdmin, asyncHandler(async (request, response) => {
@@ -492,6 +501,9 @@ staffAuthRouter.put('/users/:id/active', requireStaffAdmin, asyncHandler(async (
   const db = await getDatabase();
   const existing = await db.collection('staff_users').findOne({ _id: new ObjectId(id), tenantIds: request.staffUser?.tenantId });
   if (!existing) throw new HttpError(404, 'Staff account not found');
+  if (Array.isArray(existing.tenantAdminIds) && existing.tenantAdminIds.includes(request.staffUser?.tenantId)) {
+    throw new HttpError(400, 'Tenant administrator accounts cannot be deactivated here');
+  }
   if (normalizeStaffRole(existing.role) !== 'user') throw new HttpError(400, 'Administrator and manager accounts cannot be deactivated here');
   const user = await db.collection('staff_users').findOneAndUpdate(
     { _id: existing._id },
@@ -499,7 +511,7 @@ staffAuthRouter.put('/users/:id/active', requireStaffAdmin, asyncHandler(async (
     { returnDocument: 'after' }
   );
   if (!values.active) await db.collection('staff_sessions').deleteMany({ userId: existing._id });
-  response.json({ data: serializeStaffUser(user as Record<string, unknown>) });
+  response.json({ data: serializeStaffUser(user as Record<string, unknown>, request.staffUser?.tenantId) });
 }));
 
 staffAuthRouter.post('/logout', asyncHandler(async (request, response) => {
